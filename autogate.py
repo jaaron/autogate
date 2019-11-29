@@ -32,6 +32,10 @@ class Contour():
         self.color = 'green'
 
     @property
+    def z(self):
+        return self.points[0][2]
+        
+    @property
     def center(self):
         return sum(self.points)/len(self.points)
 
@@ -108,26 +112,28 @@ class Contour():
 
 
 class Mound:
-    def __init__(self, z, contour, inherited_volume=0.0):
-        self.contours = [(z,contour)]
+    def __init__(self, contour, inherited_volume=0.0):
+        if not isinstance(contour, Contour):
+            raise "Mounds must be created from contours"
+        self.contours = [contour]
         self.inherited_volume = inherited_volume
         pass
 
     @property
     def base_z(self):
-        return self.contours[0][0]
+        return self.contours[0].z
 
     @property
     def base_contour(self):
-        return self.contours[0][0]
+        return self.contours[0]
     
     @property
     def top_z(self):
-        return self.contours[-1][0]
+        return self.contours[-1].z
     
     @property
     def top_contour(self):
-        return self.contours[-1][1]
+        return self.contours[-1]
 
     @property
     def height(self):
@@ -136,14 +142,16 @@ class Mound:
     def volume_est(self):
         v = 0
         for i in range(1, len(self.contours)):
-            (z0,c0) = self.contours[i-1]
-            (z1,c1) = self.contours[i]
-            v += (z1 - z0) * (c0.bounding_sq_area() + c1.bounding_sq_area())/2
+            c0 = self.contours[i-1]
+            c1 = self.contours[i]
+            v += (c1.z - c0.z) * (c0.bounding_sq_area() + c1.bounding_sq_area())/2
             pass
         return v+self.inherited_volume
             
-    def grow(self, z, contour):
-        self.contours.append((z,contour))
+    def grow(self, contour):
+        if not isinstance(contour, Contour):
+            raise "Mounds must be created from contours"
+        self.contours.append(contour)
         return self
 
     def supports(self, contour):
@@ -156,17 +164,120 @@ class Mound:
         return hash(self.top_contour)
 
     def __eq__(self, other):
-        if len(self.contours) != len(other.contours):
+        if self.contours != other.contours:
             return False
-        for i in range(len(self.contours)):
-            if self.contours[i] != other.contours[i]:
-                return False
         return True
     
     def __str__(self):
-        return "Mound(%f, %s)%s" % (self.base_z, self.base_contour,
-                                        ''.join([".grow(%f, %s)" % (z, c) for (z,c) in self.contours[1:]]))
-                                            
+        return "Mound(%s)%s" % (self.base_contour,
+                                    ''.join([".grow(%s)" % c for c in self.contours[1:]]))
+
+class Tube:
+    def __init__(self, the_mesh, peak, clearance=15, apex=10, radius_start=3, radius_end=8, steps=50, fn=64, control_points=None, epsilon=0.001):
+        self.radius_start = radius_start
+        self.radius_end   = radius_end
+        self.steps        = steps
+        self.fn           = fn
+        if control_points:
+            self.control_points = control_points
+        else:
+            peak_center = peak.move_to_interior(peak.center, space=radius_start*2, epsilon=epsilon)
+            edge = min([numpy.array([the_mesh.min_[0] - clearance, peak_center[1], peak_center[2]]),
+                        numpy.array([the_mesh.max_[0] + clearance, peak_center[1], peak_center[2]]),
+                        numpy.array([peak_center[0], the_mesh.min_[1] - clearance, peak_center[2]]),
+                        numpy.array([peak_center[0], the_mesh.max_[1] + clearance, peak_center[2]])],
+                       key=lambda x: numpy.linalg.norm(peak_center - x))
+            self.control_points = [peak_center,
+                                       peak_center + numpy.array([0,0,apex]),
+                                       edge + numpy.array([0,0,apex]),
+                                       edge,
+                                       [edge[0], edge[1], the_mesh.min_[2]]]
+            pass
+        pass
+
+    def path(self):
+        n = numpy.asfortranarray(self.control_points)
+        n = numpy.transpose(n)
+        c = bezier.Curve.from_nodes(n)
+        s_vals = numpy.linspace(0.0, 1.0, self.steps)
+        return numpy.transpose(c.evaluate_multi(s_vals))
+
+    def mesh(self):
+        path      = self.path()
+        triangles = []
+        prev      = path[0]
+        prev_u    = None
+        prev_v    = None
+        first     = True
+        r_step    = (self.radius_end - self.radius_start)/len(path)
+        r         = self.radius_start
+        for point in path[1:]:
+            prev_r  = r
+            r      += r_step
+            # construct an orthonormal basis(u,v) for the plane normal to
+            # the vector point - prev
+            norm    = point - prev
+            absnorm = numpy.abs(norm)
+            mindim  = numpy.where(absnorm == numpy.min(absnorm))
+            if mindim == 0:
+                u   = numpy.array([0, -norm[2], norm[1]])
+                v   = numpy.array([norm[1]*norm[1] + norm[2]*norm[2], - norm[0]*norm[1], - norm[0]*norm[2]])
+            elif mindim == 1:
+                u   = numpy.array([-norm[2], 0 ,norm[1]])
+                v   = numpy.array([-norm[1]*norm[0], norm[0]*norm[0] + norm[2]*norm[2], -norm[1]*norm[2]])
+            else:
+                u   = numpy.array([-norm[1], norm[0], 0]) 
+                v   = numpy.array([-norm[2]*norm[0], -norm[2]*norm[1], norm[0]*norm[0] + norm[1]*norm[1]])
+                pass
+            u       = u * (r/numpy.linalg.norm(u))
+            v       = v * (r/numpy.linalg.norm(v))
+            # make the base of the tube, a disc in the plane defined by
+            # u,v at point prev
+            if first:
+                first  = False
+                prev_u = u
+                prev_v = v
+                for i in range(self.fn):
+                    triangles.append(
+                        numpy.array([prev + prev_u*cos( (2*pi*i)/self.fn) + prev_v*sin( (2*pi*i)/self.fn),
+                                     prev,
+                                     prev + prev_u*cos( (2*pi*(i+1))/self.fn) + prev_v*sin( (2*pi*(i+1))/self.fn)])
+                    )
+                    pass
+                pass
+            for i in range(self.fn):
+                # upward pointing triangle from prev to point
+                triangles.append(
+                    numpy.array([prev + prev_u*cos( (2*pi*i)/self.fn) + prev_v*sin( (2*pi*i)/self.fn),
+                                 prev + prev_u*cos( (2*pi*(i+1))/self.fn) + prev_v*sin( (2*pi*(i+1))/self.fn),
+                                 point + u*cos((2*pi*(i+0.5))/self.fn) + v*sin((2*pi*(i+0.5))/self.fn)])
+                )
+                # downward pointing triangles from point to prev
+                triangles.append(
+                    numpy.array([prev  + prev_u*cos((2*pi*i)/self.fn) + prev_v*sin((2*pi*i)/self.fn),
+                                 point + u*cos( (2*pi*(i+0.5))/self.fn) + v*sin( (2*pi*(i+0.5))/self.fn),
+                                 point + u*cos( (2*pi*(i-0.5))/self.fn) + v*sin( (2*pi*(i-0.5))/self.fn)])
+                )
+                pass
+            prev = point
+            prev_u = u
+            prev_v = v
+            pass
+        # Make the top of the tube, a disc in the plane defined by
+        # prev_u,prev_v at point prev
+        for i in range(self.fn):
+            triangles.append(
+                numpy.array([prev + prev_u*cos( (2*pi*(i-0.5))/self.fn) + prev_v*sin( (2*pi*(i-0.5))/self.fn),
+                            prev + prev_u*cos( (2*pi*(i+0.5))/self.fn) + prev_v*sin( (2*pi*(i+0.5))/self.fn),
+                            prev])
+            )
+            pass
+        data = numpy.zeros(len(triangles), dtype=stl.mesh.Mesh.dtype)
+        for i in range(len(triangles)):
+            data['vectors'][i] = triangles[i]
+        return stl.mesh.Mesh(data)
+    pass
+
 def interpolate(v1, v2, z):
     return numpy.array([v1[0] + (( (v2[0] - v1[0])/(v2[2] - v1[2]) )*(z - v1[2])),
                         v1[1] + (( (v2[1] - v1[1])/(v2[2] - v1[2]))*(z - v1[2])),
@@ -260,133 +371,36 @@ def slice(the_mesh, step=1.0, epsilon=0.001):
             segments  = intersect_z_plane(triangles, z, epsilon=epsilon)
             cs        = contours_of_segments(segments, epsilon=epsilon)
             if cs:
-                slices.append((z, cs))
+                slices.append(cs)
             z     += step
             bar.next()
     return slices
                 
-def tube(path, r_start=1, r_end=1, fn=64, close_start = False, close_end = True):
-    triangles = []
-    prev      = path[0]
-    prev_u    = None
-    prev_v    = None
-    first     = True
-    r_step    = (r_end - r_start)/len(path)
-    r         = r_start
-    for point in path[1:]:
-        prev_r  = r
-        r      += r_step
-        # construct an orthonormal basis(u,v) for the plane normal to
-        # the vector point - prev
-        norm    = point - prev
-        absnorm = numpy.abs(norm)
-        mindim  = numpy.where(absnorm == numpy.min(absnorm))
-        if mindim == 0:
-            u   = numpy.array([0, -norm[2], norm[1]])
-            v   = numpy.array([norm[1]*norm[1] + norm[2]*norm[2], - norm[0]*norm[1], - norm[0]*norm[2]])
-        elif mindim == 1:
-            u   = numpy.array([-norm[2], 0 ,norm[1]])
-            v   = numpy.array([-norm[1]*norm[0], norm[0]*norm[0] + norm[2]*norm[2], -norm[1]*norm[2]])
-        else:
-            u   = numpy.array([-norm[1], norm[0], 0]) 
-            v   = numpy.array([-norm[2]*norm[0], -norm[2]*norm[1], norm[0]*norm[0] + norm[1]*norm[1]])
-            pass
-        u       = u * (r/numpy.linalg.norm(u))
-        v       = v * (r/numpy.linalg.norm(v))
-        # make the base of the tube, a disc in the plane defined by
-        # u,v at point prev
-        if first:
-            first  = False
-            prev_u = u
-            prev_v = v
-            if close_start:
-                for i in range(fn):
-                    triangles.append(
-                        numpy.array([prev + prev_u*cos( (2*pi*i)/fn) + prev_v*sin( (2*pi*i)/fn),
-                                    prev,
-                                    prev + prev_u*cos( (2*pi*(i+1))/fn) + prev_v*sin( (2*pi*(i+1))/fn)])
-                    )
-                    pass
-                pass
-            pass
-        for i in range(fn):
-            # upward pointing triangle from prev to point
-            triangles.append(
-                numpy.array([prev + prev_u*cos( (2*pi*i)/fn) + prev_v*sin( (2*pi*i)/fn),
-                             prev + prev_u*cos( (2*pi*(i+1))/fn) + prev_v*sin( (2*pi*(i+1))/fn),
-                             point + u*cos((2*pi*(i+0.5))/fn) + v*sin((2*pi*(i+0.5))/fn)])
-            )
-            # downward pointing triangles from point to prev
-            triangles.append(
-                numpy.array([prev  + prev_u*cos((2*pi*i)/fn) + prev_v*sin((2*pi*i)/fn),
-                             point + u*cos( (2*pi*(i+0.5))/fn) + v*sin( (2*pi*(i+0.5))/fn),
-                             point + u*cos( (2*pi*(i-0.5))/fn) + v*sin( (2*pi*(i-0.5))/fn)])
-            )
-            pass
-        prev = point
-        prev_u = u
-        prev_v = v
-        pass
-    # Make the top of the tube, a disc in the plane defined by
-    # prev_u,prev_v at point prev
-    if close_end:
-        for i in range(fn):
-            triangles.append(
-                numpy.array([prev + prev_u*cos( (2*pi*(i-0.5))/fn) + prev_v*sin( (2*pi*(i-0.5))/fn),
-                            prev + prev_u*cos( (2*pi*(i+0.5))/fn) + prev_v*sin( (2*pi*(i+0.5))/fn),
-                            prev])
-            )
-            pass
-        pass
-    data = numpy.zeros(len(triangles), dtype=stl.mesh.Mesh.dtype)
-    for i in range(len(triangles)):
-        data['vectors'][i] = triangles[i]
-    return stl.mesh.Mesh(data)
-
-def place_tube(the_mesh, peak, radius_start = 3, radius_end=8, clearance=15, apex=10, steps=50, epsilon=0.001):
-    peak_center = peak[1].move_to_interior(peak[1].center, space=radius_start*2, epsilon=epsilon)
-    
-    edge = min([numpy.array([the_mesh.min_[0] - clearance, peak_center[1], peak_center[2]]),
-                numpy.array([the_mesh.max_[0] + clearance, peak_center[1], peak_center[2]]),
-                numpy.array([peak_center[0], the_mesh.min_[1] - clearance, peak_center[2]]),
-                numpy.array([peak_center[0], the_mesh.max_[1] + clearance, peak_center[2]])],
-                key=lambda x: numpy.linalg.norm(peak_center - x))
-
-    n = numpy.asfortranarray([peak_center,
-                              peak_center + numpy.array([0,0,apex]),
-                              edge + numpy.array([0,0,apex]),
-                              edge,
-                              [edge[0], edge[1], the_mesh.min_[2]]])
-    n = numpy.transpose(n)
-    c = bezier.Curve.from_nodes(n)
-    s_vals = numpy.linspace(0.0, 1.0, steps)
-    return tube(numpy.transpose(c.evaluate_multi(s_vals)), r_start = radius_start, r_end = radius_end)
-    
 def find_peaks(contours, min_vol=1.0):
-    mounds   = [Mound(contours[0][0], c) for c in contours[0][1]]
+    mounds   = [Mound(c) for c in contours[0]]
     peaks    = []
-    for (z,z_cs) in contours[1:]:
+    for z_cs in contours[1:]:
         new_mounds = []
         for m in mounds:
             cs = [c for c in z_cs if m.supports(c)]
             if len(cs) == 0:
                 peaks.append(m)
             elif len(cs) == 1:
-                new_mounds.append(m.grow(z, cs[0]))
+                new_mounds.append(m.grow(cs[0]))
             else:
                 # fixme: proportionally weight inheritance of existing mound's mass
                 vol         = m.volume_est()/len(cs)
-                new_mounds += [Mound(z, c, inherited_volume=vol) for c in cs]
+                new_mounds += [Mound(c, inherited_volume=vol) for c in cs]
                 pass
             pass
         for c in z_cs:
             if len([m for m in mounds if m.supports(c)]) == 0:
-                new_mounds.append(Mound(z, c))
+                new_mounds.append(Mound(c))
                 pass
             pass
         mounds = new_mounds
     peaks += mounds
-    return [(p.top_z, p.top_contour) for p in peaks if p.volume_est() > min_vol]
+    return [p.top_contour for p in peaks if p.volume_est() > min_vol]
 
 def preview_mesh(m):
     figure = pyplot.figure()
@@ -400,12 +414,12 @@ def preview_mesh(m):
 def preview_contours(cs):
     figure = pyplot.figure()
     axes   = figure.subplots()
-    cs     = [c[1].set_color(z_color(c[1].points[0][2], m)) for c in cs]
     max_x  = cs[0].max_x
     min_x  = cs[0].min_x
     max_y  = cs[0].max_y
     min_y  = cs[0].min_y
     for c in cs:
+        c.set_color(z_color(c.z, m))
         c.preview(axes)
         if c.max_x > max_x:
             max_x = c.max_x
@@ -431,11 +445,12 @@ def z_color(z, the_mesh):
 import argparse
 def parse_arguments():
     pa = argparse.ArgumentParser()
-    pa.add_argument('--z-step', metavar='z_step', default=1.0, type=float, help='Z step between slices')
-    pa.add_argument('--epsilon', metavar='epsilon', default=0.001, type=float, help='Max distance between two points considered equal')
-    pa.add_argument('--min-volume', metavar='min_volume', default=1.0, type=float, help='Minium (estimated) volume of a differentiated peak')
+    pa.add_argument('--z-step', default=1.0, type=float, help='Z step between slices')
+    pa.add_argument('--epsilon', default=0.001, type=float, help='Max distance between two points considered equal')
+    pa.add_argument('--min-volume', default=1.0, type=float, help='Minium (estimated) volume of a differentiated peak')
     pa.add_argument('--tube-start-radius', default=2.0, type=float, help='Initial tube radius')
     pa.add_argument('--tube-end-radius', default=4.0, type=float, help='Final tube radius')
+    pa.add_argument('--preview', default=False, const=True, action='store_const', help='Preview Peak Locations')
     pa.add_argument('stl', metavar='stl')
     pa.add_argument('out', metavar='outfile')
     return pa.parse_args()
@@ -446,10 +461,12 @@ if __name__ == "__main__":
         m = load_mesh(args.stl)
         contours = slice(m, step=args.z_step, epsilon=args.epsilon)
         ps = find_peaks(contours, min_vol=args.min_volume)
-        c  = stl.mesh.Mesh(numpy.concatenate([m.data] + [place_tube(m, p,
-                                                                    radius_start = args.tube_start_radius,
-                                                                    radius_end   = args.tube_end_radius,
-                                                                    epsilon      = args.epsilon).data
+        if args.preview:
+            preview_contours(ps)
+        c  = stl.mesh.Mesh(numpy.concatenate([m.data] + [Tube(m, p,
+                                                              radius_start = args.tube_start_radius,
+                                                              radius_end   = args.tube_end_radius,
+                                                              epsilon      = args.epsilon).mesh().data
                                                              for p in ps]))
         c.save(args.out, mode=stl.Mode.ASCII)
         pass

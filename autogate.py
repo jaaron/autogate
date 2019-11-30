@@ -34,7 +34,13 @@ class Contour():
         pass
     
     def to_json(self):
-        return {'color': self.color, 'points': self.points}
+        return {'color': self.color, 'points': [[float(p[0]), float(p[1]), float(p[2])] for p in self.points]}
+
+    @classmethod
+    def from_json(self, j):
+        c = Contour([numpy.array(p, dtype=numpy.float32) for p in j['points']])
+        c.color = j['color']
+        return c
     
     @property
     def z(self):
@@ -46,8 +52,6 @@ class Contour():
                 self.min_y + (self.max_y - self.min_y)/2,
                 self.z]
     
-    # FIXME: this is *mostly* right, but fails for one of my test
-    # cases causing the tube to be moved away from the actual peak.
     def contains_point(self, x, epsilon=0.001):
         yline = []
         left  = 0
@@ -65,9 +69,12 @@ class Contour():
     def move_to_interior(self, x, space=2, epsilon=0.001):
         if self.contains_point(x, epsilon=epsilon):
             return x
-        p = min([p for p in self.points], key=lambda p: numpy.linalg.norm(p - x))
-        vec = p - x
-        return p + space*(vec/numpy.linalg.norm(vec))
+        p    = min([p for p in self.points], key=lambda p: numpy.linalg.norm(p - x))
+        p[2] = x[2]
+        vec  = p - x
+        p    = p + space*(vec/numpy.linalg.norm(vec))
+        p[2] = self.z
+        return p
     
     def bounding_sq_area(self):
         return (self.max_x - self.min_x) * (self.max_y - self.min_y)
@@ -140,7 +147,15 @@ class Mound:
         pass
 
     def to_json(self):
-        return {'contours': self.contours, 'inherited_volume': self.inherited_volume}
+        return {'contours': [c.to_json() for c in self.contours], 'inherited_volume': self.inherited_volume}
+
+    @classmethod
+    def from_json(self, j):
+        cs = [Contour.from_json(cj) for cj in j['contours']]
+        m  = Mound(cs[0], inherited_volume=j['inherited_volume'])
+        for c in cs[1:]:
+            m.grow(c)
+        return m
     
     @property
     def base_z(self):
@@ -149,7 +164,7 @@ class Mound:
     @property
     def base_contour(self):
         return self.contours[0]
-    
+
     @property
     def top_z(self):
         return self.contours[-1].z
@@ -162,6 +177,21 @@ class Mound:
     def height(self):
         return self.top_z - self.base_z
 
+    @property
+    def center(self):
+        return self.top_contour.center
+
+    def move_to_interior(self, x, space=2, epsilon=0.001):
+        if x[2] >= self.top_contour.z - epsilon:
+            return self.top_contour.move_to_interior(x, space=space, epsilon=epsilon)
+                
+        for i in range(len(self.contours)-1, 0, -1):
+            if abs(self.contours[i-1].z - x[2]) < epsilon or (self.contours[i-1].z < x[2] and self.contours[i].z > x[2]):
+                return self.contours[i-1].move_to_interior(x, space=space, epsilon=epsilon)
+            pass
+        
+        return self.base_contour.move_to_interior(x, space=space, epsilon=epsilon)
+    
     def volume_est(self):
         v = 0
         for i in range(1, len(self.contours)):
@@ -221,12 +251,77 @@ class Tube:
             pass
         pass
 
+    def tighten(self, delta=1.0):
+        start = self.control_points[0]
+        cs    = self.control_points[1:-2]
+        edge  = self.control_points[-2]
+        foot  = self.control_points[-1]
+
+        v     = start - edge
+        v    /= numpy.linalg.norm(v)
+        edge += delta*v
+        foor += delta*v
+        cs    = [c + (delta/len(cs)) * v for c in cs]
+        self.control_points = [start] + cs + [edge, foot]
+        pass
+
+    def widen(self, delta=1.0):
+        start = self.control_points[0]
+        cs    = self.control_points[1:-2]
+        edge  = self.control_points[-2]
+        foot  = self.control_points[-1]
+
+        v     = edge - start
+        v    /= numpy.linalg.norm(v)
+        edge += delta*v
+        foor += delta*v
+        cs    = [c + (delta/len(cs)) * v for c in cs]
+        self.control_points = [start] + cs + [edge, foot]
+        pass
+
+    def translate(self, delta):
+        self.control_points = [p + delta for p in self.control_points]
+        pass
+
+    def rotate(self, theta):
+        theta = theta * 2 * pi/360.0
+        m     = numpy.matrix([[cos(theta), -sin(theta), 0], [sin(theta), cos(theta), 0], [0,0,1]])
+        for i in range(1,len(self.control_points)):
+            p    = self.control_points[i]
+            p    = p - self.control_points[0]
+            p    = (p * m).A1
+            p    = p + self.control_points[0]            
+            self.control_points[i] = p
+            
     def to_json(self):
         return {'radius_start':   self.radius_start,
                 'radius_end':     self.radius_end,
                 'steps':          self.steps,
                 'fn':             self.fn,
-                'control_points': self.control_points}
+                'control_points': [[float(p[0]), float(p[1]), float(p[2])] for p in self.control_points]}
+
+    @classmethod
+    def from_json(self, j):
+        t = Tube(None, None,
+                 radius_start   = j['radius_start'],
+                 radius_end     = j['radius_end'],
+                 steps          = j['steps'],
+                 fn             = j['fn'],
+                 control_points = [numpy.array(p, dtype=numpy.double) for p in j['control_points']])
+        if 'transform' in j:
+            for tfrm in j['transform']:
+                if tfrm['action'] == 'tighten':
+                    t.tighten(tfrm['delta'])
+                elif tfrm['action'] == 'widen':
+                    t.widen(tfrm['delta'])
+                elif tfrm['action'] == 'rotate':
+                    t.rotate(tfrm['theta'])
+                elif tfrm['action'] == 'translate':
+                    t.translate(numpy.array(tfrm['detla'], dtype=double))
+                    pass
+                pass
+            pass
+        return t
     
     def path(self):
         n = numpy.asfortranarray(self.control_points)
@@ -244,6 +339,8 @@ class Tube:
         first     = True
         r_step    = (self.radius_end - self.radius_start)/len(path)
         r         = self.radius_start
+        shift     = 0.0
+        
         for point in path[1:]:
             prev_r  = r
             r      += r_step
@@ -279,24 +376,24 @@ class Tube:
                     pass
                 pass
             
-            # FIXME: should alternate which way the triangles point so that apexes meets apexes and bases meet bases.
             for i in range(self.fn):
                 # upward pointing triangle from prev to point
                 triangles.append(
-                    numpy.array([prev + prev_u*cos( (2*pi*i)/self.fn) + prev_v*sin( (2*pi*i)/self.fn),
-                                 prev + prev_u*cos( (2*pi*(i+1))/self.fn) + prev_v*sin( (2*pi*(i+1))/self.fn),
-                                 point + u*cos((2*pi*(i+0.5))/self.fn) + v*sin((2*pi*(i+0.5))/self.fn)])
+                    numpy.array([prev + prev_u*cos( (2*pi*(i + shift))/self.fn) + prev_v*sin( (2*pi*(i + shift))/self.fn),
+                                 prev + prev_u*cos( (2*pi*(i + shift + 1))/self.fn) + prev_v*sin( (2*pi*(i+ shift + 1))/self.fn),
+                                 point + u*cos((2*pi*(i + shift + 0.5))/self.fn) + v*sin((2*pi*(i + shift + 0.5))/self.fn)])
                 )
                 # downward pointing triangles from point to prev
                 triangles.append(
-                    numpy.array([prev  + prev_u*cos((2*pi*i)/self.fn) + prev_v*sin((2*pi*i)/self.fn),
-                                 point + u*cos( (2*pi*(i+0.5))/self.fn) + v*sin( (2*pi*(i+0.5))/self.fn),
-                                 point + u*cos( (2*pi*(i-0.5))/self.fn) + v*sin( (2*pi*(i-0.5))/self.fn)])
+                    numpy.array([prev  + prev_u*cos((2*pi*(i + shift))/self.fn) + prev_v*sin((2*pi*(i + shift))/self.fn),
+                                 point + u*cos( (2*pi*(i + shift + 0.5))/self.fn) + v*sin( (2*pi*(i + shift + 0.5))/self.fn),
+                                 point + u*cos( (2*pi*(i + shift - 0.5))/self.fn) + v*sin( (2*pi*(i + shift - 0.5))/self.fn)])
                 )
                 pass
             prev = point
             prev_u = u
             prev_v = v
+            shift  = (shift + 0.5) % 1
             pass
         # Make the top of the tube, a disc in the plane defined by
         # prev_u,prev_v at point prev
@@ -435,7 +532,7 @@ def find_peaks(contours, min_vol=1.0):
             pass
         mounds = new_mounds
     peaks += mounds
-    return set([p.top_contour for p in peaks if p.volume_est() > min_vol])
+    return set([p for p in peaks if p.volume_est() > min_vol])
 
 def preview_mesh(m):
     figure = pyplot.figure()
@@ -485,11 +582,20 @@ def parse_arguments():
     pa.add_argument('--min-volume', default=1.0, type=float, help='Minium (estimated) volume of a differentiated peak')
     pa.add_argument('--tube-start-radius', default=2.0, type=float, help='Initial tube radius')
     pa.add_argument('--tube-end-radius', default=4.0, type=float, help='Final tube radius')
+    pa.add_argument('--tube-clearance', default=5.0, type=float, help='Clearance distance from mesh edge for tube placement')
+    
     pa.add_argument('--preview', default=False, const=True, action='store_const', help='Preview Peak Locations')
-    pa.add_argument('--dump-contours', default=None, type=str, help='Dump contours as json to file')
-    pa.add_argument('--dump-peaks', default=None, type=str, help='Dump peaks as json to file')
-    pa.add_argument('--dump-tubes', default=None, type=str, help='Dump tubes as json to file')
-
+    pa.add_argument('--dump-contours', default=None, type=str, help='Dump contours as JSON to file')
+    pa.add_argument('--load-contours', default=None, type=str, help='Load contours from JSON file instead of slicing')
+    pa.add_argument('--skip-slicing', default=False, action='store_const', const=True,
+                    help='Skip slicing step. Requires --load-contours, --load-peaks, or --load-tubes')
+    pa.add_argument('--dump-peaks', default=None, type=str, help='Dump peaks as JSON to file')
+    pa.add_argument('--load-peaks', default=None, type=str, help='Load peaks from JSON file instead of inferring from contours')
+    pa.add_argument('--skip-peaks', default=False, action='store_const', const=True,
+                    help='Skip peak inference step. Requires --load-peaks or --load-tubes')
+    pa.add_argument('--dump-tubes', default=None, type=str, help='Dump tubes as JSON to file')
+    pa.add_argument('--load-tubes', default=None, type=str, help='Load tubes from JSON file instead of autoplacing')
+    
     pa.add_argument('stl', metavar='stl')
     pa.add_argument('out', metavar='outfile')
     return pa.parse_args()
@@ -498,33 +604,65 @@ if __name__ == "__main__":
     if len(sys.argv) >= 2:
         args = parse_arguments()
         m = load_mesh(args.stl)
-        contours = slice(m, step=args.z_step, epsilon=args.epsilon)
-        if args.dump_contours:
-            with open(args.dump_contours, 'w') as f:
-                json.dump(list(contours), f)
+        if args.load_contours:
+            print("Loading contours from %s" % (args.load_contours), file=sys.stderr)
+            with open(args.load_contours) as f:
+                contours = [set([Contour.from_json(cj) for cj in l]) for l in json.load(f)]
                 pass
-            pass
-        ps = find_peaks(contours, min_vol=args.min_volume)
-        if args.dump_peaks:
-            with open(args.dump_peaks, 'w') as f:
-                json.dump(list(peaks), f)
+        else:
+            if not args.skip_slicing:
+                contours = slice(m, step=args.z_step, epsilon=args.epsilon)
                 pass
-            pass
-        if args.preview:
-            preview_contours(ps)
             pass
 
-        tubes = [Tube(m, p, radius_start = args.tube_start_radius,
-                          radius_end   = args.tube_end_radius,
-                          epsilon      = args.epsilon).mesh().data
-                     for p in ps]
-        if args.dump_tubes:
-            with open(args.dump_tubes, 'w') as f:
-                json.dump(tubes, f)
+        if args.dump_contours:
+            with open(args.dump_contours, 'w') as f:
+                json.dump([[c.to_json() for c in z_cs] for z_cs in contours], f)
+                pass
+            pass
+
+        if args.load_peaks:
+            print("Loading peaks from %s" % (args.load_peaks), file=sys.stderr)
+            with open(args.load_peaks) as f:
+                peaks = set([Mound.from_json(cm) for cm in json.load(f)])
+                pass
+        else:
+            if not args.skip_peaks:
+                peaks = find_peaks(contours, min_vol=args.min_volume)
                 pass
             pass
         
-        c  = stl.mesh.Mesh(numpy.concatenate([m.data] + tubes))
+        if args.dump_peaks:
+            with open(args.dump_peaks, 'w') as f:
+                json.dump([p.to_json() for p in peaks], f)
+                pass
+            pass
+        
+        if args.preview:
+            preview_contours(peaks)
+            pass
+
+        if args.load_tubes:
+            print("Loading tubes from %s" % (args.load_tubes), file=sys.stderr)
+            with open(args.load_tubes) as f:
+                tubes = [Tube.from_json(tj) for tj in json.load(f)]
+                pass
+        else:
+            tubes = [Tube(m, p,
+                              clearance    = args.tube_clearance,
+                              radius_start = args.tube_start_radius,
+                          radius_end   = args.tube_end_radius,
+                          epsilon      = args.epsilon)
+                     for p in peaks]
+            pass
+        
+        if args.dump_tubes:
+            with open(args.dump_tubes, 'w') as f:
+                json.dump([t.to_json() for t in tubes], f)
+                pass
+            pass
+        
+        c  = stl.mesh.Mesh(numpy.concatenate([m.data] + [t.mesh().data for t in tubes]))
         c.save(args.out, mode=stl.Mode.ASCII)
         pass
     pass

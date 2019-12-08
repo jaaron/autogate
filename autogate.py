@@ -11,6 +11,10 @@ from progress.bar import Bar
 import bezier
 from math import cos, sin, pi
 import json
+import os
+import subprocess
+import tempfile
+import shutil
 
 class Contour():
     def __init__(self, points):
@@ -274,7 +278,7 @@ class Tube:
         v     = edge - start
         v    /= numpy.linalg.norm(v)
         edge += delta*v
-        foor += delta*v
+        foot += delta*v
         cs    = [c + (delta/len(cs)) * v for c in cs]
         self.control_points = [start] + cs + [edge, foot]
         pass
@@ -595,7 +599,10 @@ def parse_arguments():
                     help='Skip peak inference step. Requires --load-peaks or --load-tubes')
     pa.add_argument('--dump-tubes', default=None, type=str, help='Dump tubes as JSON to file')
     pa.add_argument('--load-tubes', default=None, type=str, help='Load tubes from JSON file instead of autoplacing')
-    
+    pa.add_argument('--tubes-stl-directory', default=None, type=str, help='Output tube STL meshes to files in directory')
+    pa.add_argument('--scad-out', default=None, type=str, help='Output OpenSCAD file (requires --tubes-stl-directory)')
+    pa.add_argument('--pymesh-merge', default=False, action='store_const', const=True,
+                    help='Use docker+pymesh to merge STL files')
     pa.add_argument('stl', metavar='stl')
     pa.add_argument('out', metavar='outfile')
     return pa.parse_args()
@@ -661,8 +668,59 @@ if __name__ == "__main__":
                 json.dump([t.to_json() for t in tubes], f)
                 pass
             pass
-        
-        c  = stl.mesh.Mesh(numpy.concatenate([m.data] + [t.mesh().data for t in tubes]))
-        c.save(args.out, mode=stl.Mode.ASCII)
+
+        if args.tubes_stl_directory:
+            try:
+                os.mkdir(args.tubes_stl_directory)
+            except:
+                pass
+            i = 0
+            for t in tubes:
+                t.mesh().save(os.path.join(args.tubes_stl_directory, "tube-%d.stl" % (i)), mode=stl.Mode.ASCII)
+                i += 1
+                pass
+            pass
+
+        if args.scad_out:
+            if not args.tubes_stl_directory:
+                raise Exception('OpenSCAD output requires option --tubes-stl-directory')
+            with open(args.scad_out) as f:
+                f.write("union(){\n")
+                f.write("\timport(\"%s\");\n" % (args.stl))
+                for i in range(len(tubes)):
+                    f.write("\timport(\"%s/tube-%d.stl\")\n" % (args.tubes_stl_directory, i))
+                f.write("}\n")
+                pass
+            pass
+
+        if args.pymesh_merge:
+            with tempfile.TemporaryDirectory(dir = os.getcwd()) as tmpdir:
+                print("Saving STL to tempfiles in %s" % (tmpdir), file=sys.stderr)
+                m.save(os.path.join(tmpdir, "m0.stl"), mode=stl.Mode.ASCII)
+                i = 1
+                for t in tubes:
+                    t.mesh().save(os.path.join(tmpdir, "m%d.stl" % (i)), mode=stl.Mode.ASCII)
+                    i += 1
+                    pass
+                print("Generating merge.py script", file=sys.stderr)
+                with open(os.path.join(tmpdir, "merge.py"), "w") as script_file:
+                    script_file.write('import pymesh\n')
+                    script_file.write('merged = pymesh.CSGTree({"union": [%s]})\n'
+                                          % (',\n\t'.join(['{"mesh": pymesh.load_mesh("/files/m%d.stl")}' % (i) for i in range(len(tubes)+1)])))
+                    script_file.write('pymesh.save_mesh("/files/out.stl", merged.mesh)\n')
+                    pass
+                with open(os.path.join(tmpdir, "merge.py")) as script_file:
+                    for l in script_file:
+                        print("%s" % (l), end='', file=sys.stderr)
+                        pass
+                    pass
+                print("Running 'docker run --rm -v %s:/files pymesh/pymesh python /files/merge.py" % (tmpdir), file=sys.stderr)
+                subprocess.check_call(['docker', 'run', '--rm', '-v', '%s:/files' % (tmpdir), 'pymesh/pymesh', 'python', '/files/merge.py'])
+                print("Copying output to %s" % (args.out), file=sys.stderr)
+                shutil.copyfile(os.path.join(tmpdir, 'out.stl'), args.out)
+                pass
+        else:
+            c  = stl.mesh.Mesh(numpy.concatenate([m.data] + [t.mesh().data for t in tubes]))
+            c.save(args.out, mode=stl.Mode.ASCII)
         pass
     pass

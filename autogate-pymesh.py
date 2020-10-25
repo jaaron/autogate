@@ -1,13 +1,12 @@
+#!/usr/bin/env python
 import sys
 import numpy
 import math
 import pymesh
-# import matplotlib
-# import matplotlib.pyplot as pyplot
-# import mpl_toolkits.mplot3d as mplot3d
-# from matplotlib.widgets import Slider
+import matplotlib
+import matplotlib.pyplot as pyplot
+import mpl_toolkits.mplot3d as mplot3d
 import itertools
-# from progress.bar import Bar
 import bezier
 from math import cos, sin, pi
 import json
@@ -19,6 +18,7 @@ import shutil
 class Contour():
     def __init__(self, component):
         self.component_mesh = component
+        self.component_mesh.add_attribute("face_area")
         self.points = [component.vertices[i] for i in component.boundary_loops[0]]
         self.min_x = self.component_mesh.bbox[0][0]
         self.min_y = self.component_mesh.bbox[0][1]
@@ -64,25 +64,21 @@ class Contour():
     
     def bounding_sq_area(self):
         return (self.max_x - self.min_x) * (self.max_y - self.min_y)
+
+    def area(self):
+        return sum(self.component_mesh.get_attribute("face_area"))
     
-    def supports(self, c, max_lip = 1.0):
-        if self.min_x < c.min_x:
-            left = c.min_x
-        else:
-            left = self.min_x
-        if self.max_x < c.max_x:
-            right = self.max_x
-        else:
-            right = c.max_x
-        if self.min_y < c.min_y:
-            bottom = c.min_y
-        else:
-            bottom = self.min_y
-        if self.max_y < c.max_y:
-            top = self.max_y
-        else:
-            top = c.max_y
-        return left < right and bottom < top and (top - bottom)*(right - left) >= 0.2*self.bounding_sq_area()
+    def supports(self, c):
+        other             = pymesh.form_mesh(c.component_mesh.vertices - numpy.array([0, 0, (c.z - self.z)]),
+                                             c.component_mesh.faces)
+        pymesh.remove_duplicated_vertices(other)
+        pymesh.remove_duplicated_faces(other)
+        intersection      = pymesh.boolean(self.component_mesh, other, 'intersection')
+        pymesh.remove_duplicated_vertices(intersection)
+        pymesh.remove_duplicated_faces(intersection)
+        intersection.add_attribute("face_area")
+        intersection_area = sum(intersection.get_attribute("face_area"))
+        return intersection_area >= 0.2*self.area()
 
     def set_color(self, c):
         self.color = c
@@ -183,7 +179,7 @@ class Mound:
         for i in range(1, len(self.contours)):
             c0 = self.contours[i-1]
             c1 = self.contours[i]
-            v += (c1.z - c0.z) * (c0.bounding_sq_area() + c1.bounding_sq_area())/2
+            v += (c1.z - c0.z) * (c0.area() + c1.area())/2
             pass
         return v+self.inherited_volume
             
@@ -449,20 +445,20 @@ def preview_mesh(m):
 def preview_contours(cs):
     figure = pyplot.figure()
     axes   = figure.subplots()
-    max_x  = cs[0].max_x
-    min_x  = cs[0].min_x
-    max_y  = cs[0].max_y
-    min_y  = cs[0].min_y
+    max_x  = None
+    min_x  = None
+    max_y  = None
+    min_y  = None
     for c in cs:
         c.set_color(z_color(c.z, m))
         c.preview(axes)
-        if c.max_x > max_x:
+        if (not max_x) or (c.max_x > max_x):
             max_x = c.max_x
-        if c.min_x < min_x:
+        if (not min_x) or (c.min_x < min_x):
             min_x = c.min_x
-        if c.max_y > max_y:
+        if (not min_y) or (c.max_y > max_y):
             max_y = c.max_y
-        if c.min_y < min_y:
+        if (not c.min_y) (c.min_y < min_y):
             min_y = c.min_y
     axes.set_xlim(min_x, max_x)
     axes.set_ylim(min_y, max_y)

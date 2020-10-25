@@ -707,7 +707,7 @@ if __name__ == "__main__":
                     script_file.write('import pymesh\n')
                     script_file.write('merged = pymesh.CSGTree({"union": [%s]})\n'
                                           % (',\n\t'.join(['{"mesh": pymesh.load_mesh("/files/m%d.stl")}' % (i) for i in range(len(tubes)+1)])))
-                    script_file.write('pymesh.save_mesh("/files/out.stl", merged.mesh)\n')
+                    script_file.write('pymesh.save_mesh("/files/out.stl", merged.mesh, ascii=True)\n')
                     pass
                 with open(os.path.join(tmpdir, "merge.py")) as script_file:
                     for l in script_file:

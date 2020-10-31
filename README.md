@@ -6,7 +6,7 @@ methods. The algorithm assumes that the input STL file will be printed
 as provided, but that the casting will be done upside down (so that
 metal flows in the direction of the positive Z-axis). Tube attachment
 points are determined by walking up the model and identifying isolated
-mounds off volume greater than a provided `min_vol` value. The tubes
+mounds of volume greater than a provided `min_vol` value. The tubes
 are then routed along a simple bezier spline to the outside of the
 meshes bounding box and down to the XY-plane).
 

@@ -496,8 +496,6 @@ def parse_arguments():
     pa.add_argument('--load-tubes', default=None, type=str, help='Load tubes from JSON file instead of autoplacing')
     pa.add_argument('--tubes-stl-directory', default=None, type=str, help='Output tube STL meshes to files in directory')
     pa.add_argument('--scad-out', default=None, type=str, help='Output OpenSCAD file (requires --tubes-stl-directory)')
-    pa.add_argument('--pymesh-merge', default=False, action='store_const', const=True,
-                    help='Use docker+pymesh to merge STL files')
     pa.add_argument('stl', metavar='stl')
     pa.add_argument('out', metavar='outfile')
     return pa.parse_args()
